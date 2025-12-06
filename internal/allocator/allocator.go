@@ -76,9 +76,14 @@ func (a *Allocator) AllocateForPod(ctx context.Context, pod *corev1.Pod, ports [
 	// Initialize allocated map for this node if not exists
 	if a.allocated[key] == nil {
 		a.allocated[key] = make(map[int32]bool)
+	} else {
+		// Clear existing allocations to ensure we only track current Pods
+		// This implements port "recycling": deleted Pods' ports become available again
+		a.allocated[key] = make(map[int32]bool)
 	}
 
 	// Load existing allocations for this node from actual Pods
+	// This ensures we only track ports from currently existing Pods (port recycling)
 	if err := a.loadExistingAllocations(ctx, pod.Namespace, nodeIP, key); err != nil {
 		return nil, fmt.Errorf("failed to load existing allocations: %w", err)
 	}
