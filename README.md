@@ -59,8 +59,8 @@ HostPort Operator provides automatic hostPort allocation via a **Mutating Webhoo
 
 2. **Verify Installation**:
    ```bash
-   kubectl get pods -n system -l app.kubernetes.io/name=hostport-operator
-   kubectl get mutatingwebhookconfiguration hostport-mutating-webhook-configuration
+   kubectl get pods -n operators -l app.kubernetes.io/name=hostport-operator
+   kubectl get mutatingwebhookconfiguration hostport-operator-hostport-mutating-webhook-configuration
    ```
 
 ## Usage
@@ -184,13 +184,13 @@ make deploy
 ### Check Operator Logs
 
 ```bash
-kubectl logs -n system -l app.kubernetes.io/name=hostport-operator
+kubectl logs -n operators -l app.kubernetes.io/name=hostport-operator
 ```
 
 ### Check Webhook Configuration
 
 ```bash
-kubectl get mutatingwebhookconfiguration hostport-mutating-webhook-configuration -o yaml
+kubectl get mutatingwebhookconfiguration hostport-operator-hostport-mutating-webhook-configuration -o yaml
 ```
 
 ### Verify Pod Annotations
