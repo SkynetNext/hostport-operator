@@ -24,6 +24,8 @@ spec:
         app.kubernetes.io/name: hostport-operator
     spec:
       serviceAccountName: controller-manager
+      imagePullSecrets:
+        - name: harbor-credential
       securityContext:
         runAsNonRoot: true
       containers:
