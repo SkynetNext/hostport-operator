@@ -119,8 +119,8 @@ func (a *Allocator) allocatePort(key string, strategyStr string, basePort int32,
 		return a.findNextAvailablePort(key, basePort)
 	}
 
-	// Sequential (default): basePort + index * 2 (assuming 2 ports per Pod: grpc + health)
-	port := basePort + int32(index*2)
+	// Sequential (default): basePort + index (allocate ports sequentially, one per port)
+	port := basePort + int32(index)
 	if a.allocated[key][port] {
 		// Port is taken, find next available
 		port = a.findNextAvailablePort(key, port)

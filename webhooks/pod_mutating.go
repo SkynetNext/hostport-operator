@@ -91,6 +91,9 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 					ContainerPort: port.ContainerPort,
 					Protocol:      port.Protocol,
 				})
+				logger.Info("Port needs allocation", "port", port.Name, "containerPort", port.ContainerPort)
+			} else {
+				logger.Info("Port skipped", "port", port.Name, "containerPort", port.ContainerPort, "hostPort", port.HostPort)
 			}
 		}
 	}
