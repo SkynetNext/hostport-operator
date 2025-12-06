@@ -9,7 +9,7 @@ webhooks:
   - name: mpod.hostport.io
     clientConfig:
       service:
-        name: webhook-service
+        name: hostport-operator-webhook-service # 使用 kustomize namePrefix 后的实际 Service 名称
         namespace: operators
         path: "/mutate-pods"
     rules:
@@ -25,12 +25,19 @@ webhooks:
       - v1
     sideEffects: None
     failurePolicy: Fail
+    # 排除 Operator 自己的 Pod，避免循环依赖
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: NotIn
+          values:
+            - hostport-operator
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: webhook-service
-  namespace: kube-system
+  namespace: operators # 修复：namespace 应该是 operators
   labels:
     app.kubernetes.io/name: hostport-operator
 spec:
