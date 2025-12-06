@@ -1,0 +1,14 @@
+resources:
+  - ../rbac
+  - ../manager
+  - ../webhook
+
+namespace: system
+
+namePrefix: hostport-operator-
+
+# [IMAGE] is set during 'make deploy'
+images:
+  - name: controller
+    newName: controller
+    newTag: latest
