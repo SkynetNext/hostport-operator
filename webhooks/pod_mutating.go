@@ -95,8 +95,16 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 		}
 	}
 
+	// If no ports need allocation, still return the mutated Pod (with hostNetwork enabled)
 	if len(portsToAllocate) == 0 {
-		return admission.Allowed("No ports need allocation")
+		logger.Info("No ports need allocation, but hostNetwork is enabled", "pod", pod.Name)
+		// Marshal mutated Pod to JSON (with hostNetwork: true)
+		marshaledPod, err := json.Marshal(pod)
+		if err != nil {
+			logger.Error(err, "Failed to marshal mutated Pod")
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
+		return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
 	}
 
 	// Allocate ports
@@ -134,6 +142,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 }
 
 // injectHostPorts injects allocated hostPorts into Pod container ports
+// When hostNetwork is true, hostPort must equal containerPort (Kubernetes requirement)
 func (m *PodMutator) injectHostPorts(pod *corev1.Pod, allocatedPorts *allocator.AllocatedPorts) error {
 	portMap := make(map[string]allocator.AllocatedPort)
 	for _, port := range allocatedPorts.Ports {
@@ -147,7 +156,9 @@ func (m *PodMutator) injectHostPorts(pod *corev1.Pod, allocatedPorts *allocator.
 			port := &container.Ports[j]
 			if allocatedPort, ok := portMap[port.Name]; ok {
 				port.HostPort = allocatedPort.HostPort
-				port.ContainerPort = allocatedPort.ContainerPort
+				// When hostNetwork is true, containerPort must equal hostPort
+				// So we set containerPort to the allocated hostPort
+				port.ContainerPort = allocatedPort.HostPort
 				port.Protocol = allocatedPort.Protocol
 			}
 		}
