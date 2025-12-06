@@ -6,37 +6,36 @@ metadata:
   labels:
     app.kubernetes.io/name: hostport-operator
 webhooks:
-- name: mpod.hostport.io
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: "/mutate-pods"
-  rules:
-  - apiGroups:
-    - ""
-    apiVersions:
-    - v1
-    operations:
-    - CREATE
-    resources:
-    - pods
-  admissionReviewVersions:
-  - v1
-  sideEffects: None
-  failurePolicy: Fail
+  - name: mpod.hostport.io
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: operators
+        path: "/mutate-pods"
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+    admissionReviewVersions:
+      - v1
+    sideEffects: None
+    failurePolicy: Fail
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: webhook-service
-  namespace: system
+  namespace: kube-system
   labels:
     app.kubernetes.io/name: hostport-operator
 spec:
   ports:
-  - port: 443
-    targetPort: 9443
+    - port: 443
+      targetPort: 9443
   selector:
     app.kubernetes.io/name: hostport-operator
-

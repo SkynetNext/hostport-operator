@@ -3,7 +3,7 @@ resources:
   - ../manager
   - ../webhook
 
-namespace: system
+namespace: operators
 
 namePrefix: hostport-operator-
 

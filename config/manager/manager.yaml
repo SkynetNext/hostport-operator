@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: system
+  name: operators
   labels:
     app.kubernetes.io/name: hostport-operator
 ---
@@ -10,7 +10,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: controller-manager
-  namespace: system
+  namespace: operators
   labels:
     app.kubernetes.io/name: hostport-operator
 spec:
