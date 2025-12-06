@@ -22,8 +22,8 @@ COPY internal/ internal/
 RUN CGO_ENABLED=${CGO_ENABLED} GOOS=${GOOS} GOARCH=${GOARCH} go build -a -o manager main.go
 
 # Use distroless as minimal base image to package the manager binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+# Image should be pre-pushed to Harbor by running: ./scripts/pull-and-push-distroless.sh
+FROM 14.103.46.72/library/distroless-static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
