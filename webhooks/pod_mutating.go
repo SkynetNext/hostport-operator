@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -24,6 +25,9 @@ const (
 	AnnotationHostPortBasePort = "hostport.io/base-port"
 	// AnnotationHostPortStrategy specifies the allocation strategy
 	AnnotationHostPortStrategy = "hostport.io/strategy"
+	// AnnotationHostPortPorts specifies which port names need hostPort allocation (comma-separated, e.g., "grpc,metrics")
+	// If not specified, all ports without hostPort will be allocated
+	AnnotationHostPortPorts = "hostport.io/ports"
 	// AnnotationHostPortAllocatedPrefix is the prefix for annotations storing allocated ports
 	AnnotationHostPortAllocatedPrefix = "hostport.io/allocated-"
 )
@@ -81,9 +85,29 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	}
 
 	// Extract ports that need hostPort allocation
+	// If annotation hostport.io/ports is specified, only allocate ports listed there
+	// Otherwise, allocate all ports without hostPort
+	allowedPortNames := make(map[string]bool)
+	if portsStr := pod.Annotations[AnnotationHostPortPorts]; portsStr != "" {
+		// Parse comma-separated port names
+		ports := strings.Split(portsStr, ",")
+		for _, portName := range ports {
+			portName = strings.TrimSpace(portName)
+			if portName != "" {
+				allowedPortNames[portName] = true
+			}
+		}
+		logger.Info("HostPort allocation limited to specified ports", "ports", portsStr)
+	}
+
 	portsToAllocate := make([]allocator.PortSpec, 0)
 	for _, container := range pod.Spec.Containers {
 		for _, port := range container.Ports {
+			// If annotation specifies which ports to allocate, skip ports not in the list
+			if len(allowedPortNames) > 0 && !allowedPortNames[port.Name] {
+				logger.Info("Port skipped (not in hostport.io/ports annotation)", "port", port.Name, "containerPort", port.ContainerPort)
+				continue
+			}
 			// Only allocate hostPort if containerPort is specified but hostPort is not
 			if port.ContainerPort != 0 && port.HostPort == 0 {
 				portsToAllocate = append(portsToAllocate, allocator.PortSpec{
