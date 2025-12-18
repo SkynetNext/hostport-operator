@@ -3,6 +3,8 @@ package allocator
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,16 +28,12 @@ type Allocator struct {
 	// allocated tracks used ports per node to avoid conflicts
 	// Key: nodeName/protocol (e.g. "worker-1/TCP"), Value: set of used ports
 	allocated map[string]map[int32]bool
-	// podPortCache tracks previous allocations for stickiness (Agones-aligned)
-	// Key: podKey (namespace/podName), Value: map of containerPortName to hostPort
-	podPortCache map[string]map[string]int32
 }
 
 func NewAllocator(client client.Client) *Allocator {
 	return &Allocator{
-		client:       client,
-		allocated:    make(map[string]map[int32]bool),
-		podPortCache: make(map[string]map[string]int32),
+		client:    client,
+		allocated: make(map[string]map[int32]bool),
 	}
 }
 
@@ -58,8 +56,9 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 		nodeName = "pending"
 	}
 
-	// 1. Sync current node state to build the conflict map
-	if err := a.syncNodeState(ctx, pod.Namespace, nodeName); err != nil {
+	// 1. Sync current node state to build the conflict map and find sticky candidates
+	stickyPorts, err := a.syncNodeState(ctx, pod, nodeName)
+	if err != nil {
 		return nil, fmt.Errorf("failed to sync node state: %w", err)
 	}
 
@@ -92,17 +91,14 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 			}
 
 		case PolicyDynamic:
-			// Agones-aligned Sticky Logic:
-			// Check if this pod (by namespace/name) already had a port allocated
-			podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			// Stickiness Logic:
+			// Check if we found historical ports for this POD name during syncNodeState
 			foundSticky := false
-			if cachedPorts, ok := a.podPortCache[podKey]; ok {
-				if prevPort, exists := cachedPorts[req.Name]; exists {
-					// Check if the previous port is still free on THIS node
-					if !a.isPortInUse(nodeName, protocol, prevPort) {
-						allocatedPort = prevPort
-						foundSticky = true
-					}
+			if prevPort, exists := stickyPorts[req.Name]; exists {
+				// Check if the previous port is still free on THIS node
+				if !a.isPortInUse(nodeName, protocol, prevPort) {
+					allocatedPort = prevPort
+					foundSticky = true
 				}
 			}
 
@@ -125,13 +121,6 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 		// Mark as used in local memory to prevent intra-Pod conflicts
 		a.markUsed(nodeName, protocol, allocatedPort)
 
-		// Update cache for stickiness
-		podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-		if a.podPortCache[podKey] == nil {
-			a.podPortCache[podKey] = make(map[string]int32)
-		}
-		a.podPortCache[podKey][req.Name] = allocatedPort
-
 		results[i] = req
 		results[i].HostPort = allocatedPort
 		results[i].Protocol = protocol
@@ -140,22 +129,49 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 	return results, nil
 }
 
-func (a *Allocator) syncNodeState(ctx context.Context, namespace, nodeName string) error {
+func (a *Allocator) syncNodeState(ctx context.Context, targetPod *corev1.Pod, nodeName string) (map[string]int32, error) {
+	// stickyPorts will store ports from an existing pod with the same name (e.g. during rollout)
+	stickyPorts := make(map[string]int32)
+
 	// Clear local cache for this node
-	// Note: We use protocol-specific keys to allow TCP/UDP to share same port number
 	a.allocated[nodeName+"/TCP"] = make(map[int32]bool)
 	a.allocated[nodeName+"/UDP"] = make(map[int32]bool)
 
 	var podList corev1.PodList
-	if err := a.client.List(ctx, &podList, client.InNamespace(namespace)); err != nil {
-		return err
+	if err := a.client.List(ctx, &podList, client.InNamespace(targetPod.Namespace)); err != nil {
+		return nil, err
 	}
 
 	for _, p := range podList.Items {
+		// 1. Skip pods on other nodes
 		if nodeName != "pending" && p.Spec.NodeName != nodeName {
 			continue
 		}
 
+		// 2. Identify "Sticky Candidate": A pod with the same name
+		// This is usually the old Pod during a StatefulSet RollingUpdate
+		isSamePod := p.Name == targetPod.Name
+
+		// 3. Recovery: If it's the same pod name, extract its current allocations as sticky candidates
+		if isSamePod {
+			for annKey, annVal := range p.Annotations {
+				if strings.HasPrefix(annKey, "hostport.io/allocated-") {
+					if port, err := strconv.Atoi(annVal); err == nil {
+						portName := strings.TrimPrefix(annKey, "hostport.io/allocated-")
+						stickyPorts[portName] = int32(port)
+					}
+				}
+			}
+		}
+
+		// 4. Conflict Check:
+		// If it's the SAME Pod name (and it's being deleted), DON'T mark its ports as "in use"
+		// so the new Pod can reclaim them.
+		if isSamePod && p.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Otherwise, mark its ports as occupied
 		for _, c := range p.Spec.Containers {
 			for _, port := range c.Ports {
 				if port.HostPort != 0 {
@@ -172,7 +188,7 @@ func (a *Allocator) syncNodeState(ctx context.Context, namespace, nodeName strin
 			}
 		}
 	}
-	return nil
+	return stickyPorts, nil
 }
 
 func (a *Allocator) findFreePort(nodeName string, protocol corev1.Protocol, min, max int32) (int32, error) {
