@@ -95,23 +95,23 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 			// Agones-aligned Sticky Logic:
 			// Check if this pod (by namespace/name) already had a port allocated
 			podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			foundSticky := false
 			if cachedPorts, ok := a.podPortCache[podKey]; ok {
 				if prevPort, exists := cachedPorts[req.Name]; exists {
 					// Check if the previous port is still free on THIS node
 					if !a.isPortInUse(nodeName, protocol, prevPort) {
 						allocatedPort = prevPort
-						goto allocated
+						foundSticky = true
 					}
 				}
 			}
 
-			allocatedPort, err = a.findFreePort(nodeName, protocol, minPort, maxPort)
-			if err != nil {
-				return nil, err
+			if !foundSticky {
+				allocatedPort, err = a.findFreePort(nodeName, protocol, minPort, maxPort)
+				if err != nil {
+					return nil, err
+				}
 			}
-
-		allocated:
-			// Successfully determined a port
 
 		default:
 			return nil, fmt.Errorf("unsupported port policy: %s", req.Policy)
