@@ -155,9 +155,9 @@ func (a *Allocator) syncNodeState(ctx context.Context, targetPod *corev1.Pod, no
 		// 3. Recovery: If it's the same pod name, extract its current allocations as sticky candidates
 		if isSamePod {
 			for annKey, annVal := range p.Annotations {
-				if strings.HasPrefix(annKey, "hostport.io/allocated-") {
+				if after, ok := strings.CutPrefix(annKey, "hostport.io/allocated-"); ok {
 					if port, err := strconv.Atoi(annVal); err == nil {
-						portName := strings.TrimPrefix(annKey, "hostport.io/allocated-")
+						portName := after
 						stickyPorts[portName] = int32(port)
 					}
 				}
