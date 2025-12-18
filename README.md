@@ -1,210 +1,71 @@
 # HostPort Operator
 
-A Kubernetes Mutating Webhook for automatic hostPort allocation, solving concurrent port conflicts in Pod deployments.
+A production-grade Kubernetes Mutating Webhook designed for workloads requiring high-performance, predictable, and direct network access. It provides deterministic hostPort allocation, effectively replacing the need for complex Service Mesh or LoadBalancer setups in low-latency scenarios.
 
-## Overview
+## Core Capabilities
 
-HostPort Operator provides automatic hostPort allocation via a **Mutating Webhook**. When you create a Pod (via StatefulSet, Deployment, etc.) with the `hostport.io/enabled: "true"` annotation, the webhook automatically allocates available hostPorts and injects them into the Pod spec.
+Inspired by industry standards like **Agones**, this operator provides robust port management that standard Kubernetes lacks:
 
-## Features
+### 1. Advanced Allocation Policies
+- **`Index` (Deterministic)**: Maps ports based on the numeric suffix of the Pod name (e.g., `*-0`, `*-1`). Essential for predictable network topology without external service discovery.
+- **`Dynamic` (Pooled)**: Automatically finds the first available port within a specified range on the target node.
+- **`Passthrough`**: Directly maps the `containerPort` to the `hostPort`. Ideal for applications that already manage their own port uniqueness.
+- **`Static`**: Honors user-defined `hostPort` values in the Pod spec while still providing conflict detection on the node.
 
-- 🔒 **Concurrent Safe**: Global mutex ensures no hostPort conflicts
-- 🎯 **Automatic Allocation**: Mutating Webhook automatically injects hostPorts
-- 🚀 **Works with Standard Resources**: Use StatefulSet, Deployment, DaemonSet, etc.
-- 📋 **User Control**: You manage Pod lifecycle, Operator only handles ports
+### 2. Multi-Port Stride Protection
+When a Pod requests multiple ports (e.g., `game`, `metrics`, `admin`), the operator uses a **Stride of 100** for the `Index` policy. This ensures that `app-0` and `app-1` never have overlapping port ranges, even if they occupy multiple ports each.
 
-## Architecture
+### 3. Automated Pod Mutation
+- **Enforces `hostNetwork: true`**: Automatically enables host networking if the operator is active for the Pod.
+- **Spec Correction**: Ensures `containerPort` matches the allocated `hostPort` when using host networking (a Kubernetes requirement for reliable routing).
+- **Node-Awareness**: Scans the actual state of the target Node before allocation to guarantee zero physical port conflicts.
 
-```
-┌─────────────────┐
-│  StatefulSet    │  (User creates this)
-│  / Deployment   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│      Pod        │  (With annotation: hostport.io/enabled: "true")
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Mutating Webhook│  (Intercepts Pod creation)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Allocator     │  (Allocates ports, ensures no conflicts)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Pod Created   │  (With allocated hostPorts injected)
-└─────────────────┘
-```
+### 4. Observability & Audit
+Every allocation is written back to the Pod's annotations, providing a clear audit trail of which hostPort was assigned to which container port.
 
-## Installation
+## Annotation Specification
 
-### Prerequisites
+| Annotation | Policy / Value | Description |
+|------------|----------------|-------------|
+| `hostport.io/enabled` | `true` | **Required**. Activates the operator for this Pod. |
+| `hostport.io/policy` | `Index` / `Dynamic` / `Passthrough` / `Static` | Allocation strategy. Defaults to `Index`. |
+| `hostport.io/min-port` | Integer | Lower bound of the port range (Default: `7000`). |
+| `hostport.io/max-port` | Integer | Upper bound of the port range (Default: `8000`). |
 
-- Kubernetes 1.20+
-- kubectl configured to access your cluster
-- Go 1.21+ (for building from source)
-
-### Deploy the Operator
-
-1. **Deploy the Operator**:
-   ```bash
-   make deploy
-   ```
-
-2. **Verify Installation**:
-   ```bash
-   kubectl get pods -n operators -l app.kubernetes.io/name=hostport-operator
-   kubectl get mutatingwebhookconfiguration hostport-operator-hostport-mutating-webhook-configuration
-   ```
-
-## Usage
-
-### Create a Pod with Automatic hostPort Allocation
-
-Simply add the annotation `hostport.io/enabled: "true"` to your Pod template:
+## Usage Example
 
 ```yaml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: game-server
+  name: distributed-db
 spec:
-  replicas: 2
   template:
     metadata:
       annotations:
-        hostport.io/enabled: "true"        # Enable hostPort allocation
-        hostport.io/base-port: "30558"     # Optional: base port (default: 30558)
-        hostport.io/strategy: "Sequential" # Optional: Sequential or Random (default: Sequential)
+        hostport.io/enabled: "true"
+        hostport.io/policy: "Index" # Predictable ports based on index
+        hostport.io/min-port: "10000"
     spec:
-      hostNetwork: true                     # Required: must be true
       containers:
-      - name: game
-        image: my-game-server:latest
+      - name: node
         ports:
-        - name: grpc
-          containerPort: 19805
-          # hostPort will be automatically allocated by the webhook
-        - name: health
-          containerPort: 9090
-          # hostPort will be automatically allocated by the webhook
+        - name: primary
+          containerPort: 8080 # Allocated to 10000 (db-0), 10001 (db-1), etc.
+        - name: metrics
+          containerPort: 9090 # Allocated to 10100 (db-0), 10101 (db-1), etc. (Stride 100)
 ```
 
-### Annotation Reference
+## Architecture
 
-| Annotation | Description | Default | Required |
-|------------|-------------|---------|----------|
-| `hostport.io/enabled` | Enable hostPort allocation | - | Yes (must be `"true"`) |
-| `hostport.io/base-port` | Starting port number for allocation | `30558` | No |
-| `hostport.io/strategy` | Allocation strategy (`Sequential` or `Random`) | `Sequential` | No |
+1. **Intercept**: Webhook catches the Pod creation request.
+2. **Context Discovery**: Extracts index from Pod name and range from annotations.
+3. **Node Sync**: Lists existing Pods on the target node to build a "Used Port Map".
+4. **Allocate**: Calculates the port based on policy and verifies availability.
+5. **Inject**: Mutates the Pod Spec and adds audit annotations.
 
-### Check Allocated Ports
-
-After Pod creation, check the annotations to see allocated ports:
+## Installation
 
 ```bash
-kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations}'
+make deploy IMG=your-registry/hostport-operator:latest
 ```
-
-The allocated ports are stored in annotations:
-- `hostport.io/allocated-<port-name>`: The allocated hostPort number
-
-### Example
-
-See `config/samples/statefulset-example.yaml` for a complete example.
-
-## How It Works
-
-1. **User creates Pod** (via StatefulSet, Deployment, etc.) with `hostport.io/enabled: "true"` annotation
-2. **Mutating Webhook intercepts** the Pod creation request
-3. **Allocator checks** existing Pods on the same node to find available ports
-4. **Ports are allocated** based on the specified strategy (Sequential or Random)
-5. **hostPort values are injected** into the Pod spec
-6. **Pod is created** with allocated hostPorts
-
-## Allocation Strategies
-
-- **Sequential**: Allocates ports sequentially based on index (deterministic)
-  - Pod 0: 30558, 30559
-  - Pod 1: 30560, 30561
-  - etc.
-
-- **Random**: Allocates ports randomly from available pool
-  - Finds first available port starting from basePort
-
-## Development
-
-### Prerequisites
-
-- Go 1.21+
-- kubebuilder tools (installed via Makefile)
-
-### Build
-
-```bash
-# Generate RBAC manifests
-make manifests
-
-# Build the manager binary
-make build
-
-# Run tests
-make test
-```
-
-### Run Locally
-
-```bash
-make run
-```
-
-### Build and Push Docker Image
-
-```bash
-export IMG=your-registry/hostport-operator:tag
-make docker-build
-make docker-push
-```
-
-### Deploy
-
-```bash
-# Deploy to cluster
-make deploy
-```
-
-## Troubleshooting
-
-### Check Operator Logs
-
-```bash
-kubectl logs -n operators -l app.kubernetes.io/name=hostport-operator
-```
-
-### Check Webhook Configuration
-
-```bash
-kubectl get mutatingwebhookconfiguration hostport-operator-hostport-mutating-webhook-configuration -o yaml
-```
-
-### Verify Pod Annotations
-
-```bash
-kubectl get pod <pod-name> -o yaml | grep hostport.io
-```
-
-### Common Issues
-
-1. **Webhook not called**: Check MutatingWebhookConfiguration and Service
-2. **Port conflict**: Operator automatically finds next available port
-3. **hostNetwork not set**: Webhook automatically sets `hostNetwork: true` if annotation is present
-
-## License
-
-This project is licensed under the Apache 2.0 License.

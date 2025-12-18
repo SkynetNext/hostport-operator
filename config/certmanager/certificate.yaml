@@ -1,0 +1,30 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: hostport-operator-webhook-cert
+  namespace: operators
+  labels:
+    app.kubernetes.io/name: hostport-operator
+spec:
+  secretName: hostport-operator-webhook-cert
+  issuerRef:
+    # Use selfsigned ClusterIssuer if available, otherwise create a ClusterIssuer:
+    # kubectl apply -f - <<EOF
+    # apiVersion: cert-manager.io/v1
+    # kind: ClusterIssuer
+    # metadata:
+    #   name: selfsigned-issuer
+    # spec:
+    #   selfSigned: {}
+    # EOF
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+  dnsNames:
+    - hostport-operator-webhook-service
+    - hostport-operator-webhook-service.operators
+    - hostport-operator-webhook-service.operators.svc
+    - hostport-operator-webhook-service.operators.svc.cluster.local
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiry
+

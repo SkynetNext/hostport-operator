@@ -33,7 +33,7 @@ spec:
             - /manager
           args:
             - --leader-elect
-          image: controller:latest
+          image: hostport-operator-controller:latest
           name: manager
           securityContext:
             allowPrivilegeEscalation: false

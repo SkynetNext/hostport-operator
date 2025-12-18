@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,27 +20,20 @@ import (
 )
 
 const (
-	// AnnotationHostPortEnabled indicates that hostPort allocation is enabled for this Pod
-	AnnotationHostPortEnabled = "hostport.io/enabled"
-	// AnnotationHostPortBasePort specifies the base port for allocation
-	AnnotationHostPortBasePort = "hostport.io/base-port"
-	// AnnotationHostPortStrategy specifies the allocation strategy
-	AnnotationHostPortStrategy = "hostport.io/strategy"
-	// AnnotationHostPortPorts specifies which port names need hostPort allocation (comma-separated, e.g., "grpc,metrics")
-	// If not specified, all ports without hostPort will be allocated
-	AnnotationHostPortPorts = "hostport.io/ports"
-	// AnnotationHostPortAllocatedPrefix is the prefix for annotations storing allocated ports
-	AnnotationHostPortAllocatedPrefix = "hostport.io/allocated-"
+	AnnotationEnabled         = "hostport.io/enabled"
+	AnnotationPolicy          = "hostport.io/policy"
+	AnnotationMinPort         = "hostport.io/min-port"
+	AnnotationMaxPort         = "hostport.io/max-port"
+	AnnotationStride          = "hostport.io/stride"
+	AnnotationAllocatedPrefix = "hostport.io/allocated-"
 )
 
-// PodMutator mutates Pods to inject allocated hostPorts
 type PodMutator struct {
 	Client    client.Client
 	decoder   *admission.Decoder
 	allocator *allocator.Allocator
 }
 
-// NewPodMutator creates a new Pod mutator
 func NewPodMutator(client client.Client, scheme *runtime.Scheme, alloc *allocator.Allocator) *PodMutator {
 	return &PodMutator{
 		Client:    client,
@@ -48,153 +42,118 @@ func NewPodMutator(client client.Client, scheme *runtime.Scheme, alloc *allocato
 	}
 }
 
-// Handle handles admission requests for Pods
 func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx)
-
 	pod := &corev1.Pod{}
 	if err := m.decoder.Decode(req, pod); err != nil {
-		logger.Error(err, "Failed to decode Pod")
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	// Check if hostPort allocation is enabled
-	enabled := pod.Annotations[AnnotationHostPortEnabled]
-	if enabled != "true" {
+	if pod.Annotations[AnnotationEnabled] != "true" {
 		return admission.Allowed("hostPort allocation not enabled")
 	}
 
-	// Ensure hostNetwork is enabled
-	if !pod.Spec.HostNetwork {
-		pod.Spec.HostNetwork = true
-		logger.Info("Enabled hostNetwork for Pod", "pod", pod.Name)
-	}
-
-	// Get allocation parameters from annotations
-	basePort := int32(30558) // default
-	if basePortStr := pod.Annotations[AnnotationHostPortBasePort]; basePortStr != "" {
-		if _, err := fmt.Sscanf(basePortStr, "%d", &basePort); err != nil {
-			logger.Error(err, "Invalid base port annotation", "value", basePortStr)
-			return admission.Errored(http.StatusBadRequest, fmt.Errorf("invalid base port: %s", basePortStr))
+	// 1. Configuration Parsing
+	minPort := int32(7000)
+	if val, ok := pod.Annotations[AnnotationMinPort]; ok {
+		if i, err := strconv.Atoi(val); err == nil {
+			minPort = int32(i)
 		}
 	}
 
-	strategy := "Sequential" // default
-	if strategyStr := pod.Annotations[AnnotationHostPortStrategy]; strategyStr != "" {
-		strategy = strategyStr
-	}
-
-	// Extract ports that need hostPort allocation
-	// If annotation hostport.io/ports is specified, only allocate ports listed there
-	// Otherwise, allocate all ports without hostPort
-	allowedPortNames := make(map[string]bool)
-	if portsStr := pod.Annotations[AnnotationHostPortPorts]; portsStr != "" {
-		// Parse comma-separated port names
-		ports := strings.Split(portsStr, ",")
-		for _, portName := range ports {
-			portName = strings.TrimSpace(portName)
-			if portName != "" {
-				allowedPortNames[portName] = true
-			}
+	maxPort := int32(8000)
+	if val, ok := pod.Annotations[AnnotationMaxPort]; ok {
+		if i, err := strconv.Atoi(val); err == nil {
+			maxPort = int32(i)
 		}
-		logger.Info("HostPort allocation limited to specified ports", "ports", portsStr)
 	}
 
-	portsToAllocate := make([]allocator.PortSpec, 0)
+	stride := int32(10) // Default stride per Pod (Agones-aligned)
+	if val, ok := pod.Annotations[AnnotationStride]; ok {
+		if i, err := strconv.Atoi(val); err == nil {
+			stride = int32(i)
+		}
+	}
+
+	policy := allocator.PolicyIndex
+	if val, ok := pod.Annotations[AnnotationPolicy]; ok {
+		policy = allocator.PortPolicy(val)
+	}
+
+	// 2. Extract Numeric Index from Name (app-0, app-1...)
+	index := int32(0)
+	name := pod.Name
+	if name == "" {
+		name = pod.GenerateName
+	}
+	if lastDash := strings.LastIndex(name, "-"); lastDash != -1 {
+		if o, err := strconv.Atoi(name[lastDash+1:]); err == nil {
+			index = int32(o)
+		}
+	}
+
+	// 3. Collect Port Requests
+	var portRequests []allocator.PortRequest
 	for _, container := range pod.Spec.Containers {
 		for _, port := range container.Ports {
-			// If annotation specifies which ports to allocate, skip ports not in the list
-			if len(allowedPortNames) > 0 && !allowedPortNames[port.Name] {
-				logger.Info("Port skipped (not in hostport.io/ports annotation)", "port", port.Name, "containerPort", port.ContainerPort)
-				continue
-			}
-			// Only allocate hostPort if containerPort is specified but hostPort is not
-			if port.ContainerPort != 0 && port.HostPort == 0 {
-				portsToAllocate = append(portsToAllocate, allocator.PortSpec{
+			if port.HostPort == 0 && port.ContainerPort != 0 {
+				portRequests = append(portRequests, allocator.PortRequest{
 					Name:          port.Name,
 					ContainerPort: port.ContainerPort,
 					Protocol:      port.Protocol,
+					Policy:        policy,
 				})
-				logger.Info("Port needs allocation", "port", port.Name, "containerPort", port.ContainerPort)
-			} else {
-				logger.Info("Port skipped", "port", port.Name, "containerPort", port.ContainerPort, "hostPort", port.HostPort)
 			}
 		}
 	}
 
-	// If no ports need allocation, still return the mutated Pod (with hostNetwork enabled)
-	if len(portsToAllocate) == 0 {
-		logger.Info("No ports need allocation, but hostNetwork is enabled", "pod", pod.Name)
-		// Marshal mutated Pod to JSON (with hostNetwork: true)
-		marshaledPod, err := json.Marshal(pod)
-		if err != nil {
-			logger.Error(err, "Failed to marshal mutated Pod")
-			return admission.Errored(http.StatusInternalServerError, err)
-		}
-		return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
+	if len(portRequests) == 0 {
+		return admission.Allowed("no ports need allocation")
 	}
 
-	// Allocate ports
-	allocatedPorts, err := m.allocator.AllocateForPod(ctx, pod, portsToAllocate, strategy, basePort)
+	// 4. Perform Allocation with Protocol and Stride Awareness
+	allocated, err := m.allocator.Allocate(ctx, pod, portRequests, minPort, maxPort, index, stride)
 	if err != nil {
-		logger.Error(err, "Failed to allocate ports")
-		return admission.Denied(fmt.Sprintf("Failed to allocate hostPorts: %v", err))
+		logger.Error(err, "Port allocation failed")
+		return admission.Denied(err.Error())
 	}
 
-	// Inject allocated hostPorts into Pod
-	if err := m.injectHostPorts(pod, allocatedPorts); err != nil {
-		logger.Error(err, "Failed to inject hostPorts")
-		return admission.Errored(http.StatusInternalServerError, err)
+	// 5. Apply Mutations
+	if !pod.Spec.HostNetwork {
+		pod.Spec.HostNetwork = true
 	}
 
-	// Add annotations to track allocated ports
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
-	for _, port := range allocatedPorts.Ports {
-		pod.Annotations[fmt.Sprintf("%s%s", AnnotationHostPortAllocatedPrefix, port.Name)] = fmt.Sprintf("%d", port.HostPort)
+
+	for _, a := range allocated {
+		m.applyToSpec(pod, a)
+		pod.Annotations[AnnotationAllocatedPrefix+a.Name] = fmt.Sprintf("%d", a.HostPort)
 	}
 
-	logger.Info("Allocated hostPorts for Pod", "pod", pod.Name, "ports", allocatedPorts.Ports)
-
-	// Marshal mutated Pod to JSON
 	marshaledPod, err := json.Marshal(pod)
 	if err != nil {
-		logger.Error(err, "Failed to marshal mutated Pod")
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
-	// Return mutated Pod
 	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
 }
 
-// injectHostPorts injects allocated hostPorts into Pod container ports
-// When hostNetwork is true, hostPort must equal containerPort (Kubernetes requirement)
-func (m *PodMutator) injectHostPorts(pod *corev1.Pod, allocatedPorts *allocator.AllocatedPorts) error {
-	portMap := make(map[string]allocator.AllocatedPort)
-	for _, port := range allocatedPorts.Ports {
-		portMap[port.Name] = port
-	}
-
-	// Update container ports with allocated hostPorts
+func (m *PodMutator) applyToSpec(pod *corev1.Pod, alloc allocator.PortRequest) {
 	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		for j := range container.Ports {
-			port := &container.Ports[j]
-			if allocatedPort, ok := portMap[port.Name]; ok {
-				port.HostPort = allocatedPort.HostPort
-				// When hostNetwork is true, containerPort must equal hostPort
-				// So we set containerPort to the allocated hostPort
-				port.ContainerPort = allocatedPort.HostPort
-				port.Protocol = allocatedPort.Protocol
+		for j := range pod.Spec.Containers[i].Ports {
+			p := &pod.Spec.Containers[i].Ports[j]
+			// Match by name or by original containerPort
+			if p.Name == alloc.Name || (p.Name == "" && p.ContainerPort == alloc.ContainerPort) {
+				p.HostPort = alloc.HostPort
+				// For hostNetwork, containerPort should be updated to match allocated hostPort
+				p.ContainerPort = alloc.HostPort
 			}
 		}
 	}
-
-	return nil
 }
 
-// SetupWithManager sets up the webhook with the manager
 func SetupWithManager(mgr ctrl.Manager, alloc *allocator.Allocator) error {
 	mutator := NewPodMutator(mgr.GetClient(), mgr.GetScheme(), alloc)
 	mgr.GetWebhookServer().Register("/mutate-pods", &webhook.Admission{

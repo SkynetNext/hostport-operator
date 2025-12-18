@@ -2,13 +2,14 @@ resources:
   - ../rbac
   - ../manager
   - ../webhook
+  - ../certmanager
 
 namespace: operators
 
 namePrefix: hostport-operator-
 
-# [IMAGE] is set during 'make deploy'
+# Image configuration for ArgoCD/Kustomize
 images:
-  - name: controller
-    newName: controller
+  - name: hostport-operator-controller
+    newName: 14.103.46.72/hgame/hostport-operator
     newTag: latest
