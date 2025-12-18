@@ -1,6 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-
+# Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
+CRD_OPTIONS ?= "crd:trivialVersions=true,preserveUnknownFields=false"
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -26,6 +27,10 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate ClusterRole objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role paths="./..." output:rbac:artifacts:config=config/rbac
+
+.PHONY: generate
+generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -72,16 +77,16 @@ uninstall: ## Uninstall RBAC from the K8s cluster specified in ~/.kube/config.
 	kubectl delete --ignore-not-found=$(ignore-not-found) -f config/rbac
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	@if [ -z "$(IMG)" ]; then \
-		echo "Error: IMG is not set. Example: make deploy IMG=your-registry/hostport-operator:latest"; \
+		echo "Error: IMG is not set. Example: make deploy IMG=14.103.46.72/hgame/hostport-operator:latest"; \
 		exit 1; \
 	fi
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/default | kubectl apply -f -
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
+undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Build Dependencies
@@ -111,3 +116,4 @@ $(KUSTOMIZE): $(LOCALBIN)
 	set -e ;\
 	curl -s https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh | bash -s -- $(subst v,,$(KUSTOMIZE_VERSION)) $(LOCALBIN) ;\
 	}
+

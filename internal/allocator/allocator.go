@@ -26,12 +26,16 @@ type Allocator struct {
 	// allocated tracks used ports per node to avoid conflicts
 	// Key: nodeName/protocol (e.g. "worker-1/TCP"), Value: set of used ports
 	allocated map[string]map[int32]bool
+	// podPortCache tracks previous allocations for stickiness (Agones-aligned)
+	// Key: podKey (namespace/podName), Value: map of containerPortName to hostPort
+	podPortCache map[string]map[string]int32
 }
 
 func NewAllocator(client client.Client) *Allocator {
 	return &Allocator{
-		client:    client,
-		allocated: make(map[string]map[int32]bool),
+		client:       client,
+		allocated:    make(map[string]map[int32]bool),
+		podPortCache: make(map[string]map[string]int32),
 	}
 }
 
@@ -88,10 +92,26 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 			}
 
 		case PolicyDynamic:
+			// Agones-aligned Sticky Logic:
+			// Check if this pod (by namespace/name) already had a port allocated
+			podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			if cachedPorts, ok := a.podPortCache[podKey]; ok {
+				if prevPort, exists := cachedPorts[req.Name]; exists {
+					// Check if the previous port is still free on THIS node
+					if !a.isPortInUse(nodeName, protocol, prevPort) {
+						allocatedPort = prevPort
+						goto allocated
+					}
+				}
+			}
+
 			allocatedPort, err = a.findFreePort(nodeName, protocol, minPort, maxPort)
 			if err != nil {
 				return nil, err
 			}
+
+		allocated:
+			// Successfully determined a port
 
 		default:
 			return nil, fmt.Errorf("unsupported port policy: %s", req.Policy)
@@ -104,6 +124,13 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 
 		// Mark as used in local memory to prevent intra-Pod conflicts
 		a.markUsed(nodeName, protocol, allocatedPort)
+
+		// Update cache for stickiness
+		podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+		if a.podPortCache[podKey] == nil {
+			a.podPortCache[podKey] = make(map[string]int32)
+		}
+		a.podPortCache[podKey][req.Name] = allocatedPort
 
 		results[i] = req
 		results[i].HostPort = allocatedPort
