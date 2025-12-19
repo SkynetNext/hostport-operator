@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/SkynetNext/hostport-operator/internal/allocator"
+	"github.com/SkynetNext/hostport-operator/internal/metrics"
 )
 
 const (
@@ -46,10 +47,12 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	logger := log.FromContext(ctx)
 	pod := &corev1.Pod{}
 	if err := m.decoder.Decode(req, pod); err != nil {
+		metrics.WebhookRequestsTotal.WithLabelValues("errored").Inc()
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
 	if pod.Annotations[AnnotationEnabled] != "true" {
+		metrics.WebhookRequestsTotal.WithLabelValues("allowed").Inc()
 		return admission.Allowed("hostPort allocation not enabled")
 	}
 
@@ -108,6 +111,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	}
 
 	if len(portRequests) == 0 {
+		metrics.WebhookRequestsTotal.WithLabelValues("allowed").Inc()
 		return admission.Allowed("no ports need allocation")
 	}
 
@@ -115,6 +119,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 	allocated, err := m.allocator.Allocate(ctx, pod, portRequests, minPort, maxPort, index, stride)
 	if err != nil {
 		logger.Error(err, "Port allocation failed")
+		metrics.WebhookRequestsTotal.WithLabelValues("denied").Inc()
 		return admission.Denied(err.Error())
 	}
 
@@ -134,9 +139,11 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 
 	marshaledPod, err := json.Marshal(pod)
 	if err != nil {
+		metrics.WebhookRequestsTotal.WithLabelValues("errored").Inc()
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
+	metrics.WebhookRequestsTotal.WithLabelValues("allowed").Inc()
 	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledPod)
 }
 

@@ -3,6 +3,7 @@ resources:
   - ../manager
   - ../webhook
   - ../certmanager
+  - ../monitoring
 
 namespace: operators
 

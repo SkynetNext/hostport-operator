@@ -6,9 +6,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/SkynetNext/hostport-operator/internal/metrics"
 )
 
 // PortPolicy defines how ports are allocated
@@ -48,6 +51,15 @@ type PortRequest struct {
 
 // Allocate performs Agones-aligned port allocation
 func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []PortRequest, minPort, maxPort, index, stride int32) ([]PortRequest, error) {
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		// Record duration for the first request's policy (all requests in a batch share the same policy)
+		if len(requests) > 0 {
+			metrics.PortAllocationDurationSeconds.WithLabelValues(string(requests[0].Policy)).Observe(duration)
+		}
+	}()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -76,6 +88,7 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 		case PolicyStatic:
 			allocatedPort = req.HostPort
 			if allocatedPort == 0 {
+				metrics.PortAllocationErrorsTotal.WithLabelValues(string(req.Policy), "missing_hostport").Inc()
 				return nil, fmt.Errorf("static policy requires hostPort to be set in spec")
 			}
 
@@ -87,6 +100,7 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 			// pod-0 gets [min, min+stride), pod-1 gets [min+stride, min+2*stride)
 			allocatedPort = minPort + (index * stride) + int32(i)
 			if allocatedPort > maxPort {
+				metrics.PortAllocationErrorsTotal.WithLabelValues(string(req.Policy), "exceeds_max_port").Inc()
 				return nil, fmt.Errorf("allocated port %d (index %d, port_idx %d) exceeds max-port %d", allocatedPort, index, i, maxPort)
 			}
 
@@ -105,21 +119,28 @@ func (a *Allocator) Allocate(ctx context.Context, pod *corev1.Pod, requests []Po
 			if !foundSticky {
 				allocatedPort, err = a.findFreePort(nodeName, protocol, minPort, maxPort)
 				if err != nil {
+					metrics.PortAllocationErrorsTotal.WithLabelValues(string(req.Policy), "exhausted").Inc()
 					return nil, err
 				}
 			}
 
 		default:
+			metrics.PortAllocationErrorsTotal.WithLabelValues(string(req.Policy), "unsupported_policy").Inc()
 			return nil, fmt.Errorf("unsupported port policy: %s", req.Policy)
 		}
 
 		// Conflict check: distinguish between TCP and UDP (Agones feature)
 		if a.isPortInUse(nodeName, protocol, allocatedPort) {
+			metrics.PortConflictsTotal.WithLabelValues(nodeName, string(protocol)).Inc()
+			metrics.PortAllocationErrorsTotal.WithLabelValues(string(req.Policy), "conflict").Inc()
 			return nil, fmt.Errorf("port %d/%s is already in use on node %s", allocatedPort, protocol, nodeName)
 		}
 
 		// Mark as used in local memory to prevent intra-Pod conflicts
 		a.markUsed(nodeName, protocol, allocatedPort)
+
+		// Record successful allocation
+		metrics.PortAllocationsTotal.WithLabelValues(string(req.Policy), string(protocol)).Inc()
 
 		results[i] = req
 		results[i].HostPort = allocatedPort
