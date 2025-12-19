@@ -24,8 +24,25 @@ webhooks:
     admissionReviewVersions:
       - v1
     sideEffects: None
-    failurePolicy: Fail
+    # 修改为 Ignore：即使 webhook 调用失败（如证书问题），也不会阻止 Pod 创建
+    # 这样不会影响其他不需要 hostport 的 Pod
+    failurePolicy: Ignore
+    # 排除系统命名空间（通过命名空间的 kubernetes.io/metadata.name 标签）
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+            - operators
+            - monitoring
+            - istio-system
+            - argocd
     # 排除 Operator 自己的 Pod，避免循环依赖
+    # 注意：objectSelector 只能匹配 labels，不能直接匹配 annotations
+    # 代码逻辑中会检查 hostport.io/enabled=true 注解，如果没有则快速返回 allowed
     objectSelector:
       matchExpressions:
         - key: app.kubernetes.io/name
